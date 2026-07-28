@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>쓰레기 무단투기 신고</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f7f3; color: #20312b; font-family: system-ui, sans-serif; }
+    .page { width: 100%; max-width: 650px; margin: auto; padding: 40px 18px; }
+    .box, .item { background: #fff; border: 1px solid #dfe9e1; border-radius: 16px; padding: 28px; box-shadow: 0 8px 25px #1a452c12; }
+    .box { margin-bottom: 28px; }
+    .tag { display: inline-block; padding: 5px 10px; border-radius: 99px; color: #287044; background: #e5f4e9; font-size: 13px; font-weight: 700; }
+    h1 { margin: 12px 0 6px; }
+    h2 { margin: 10px 0; }
+    p { color: #65766c; }
+    label { display: block; margin-top: 18px; font-weight: 700; }
+    input, textarea { width: 100%; margin-top: 8px; padding: 12px; border: 1px solid #cddbd0; border-radius: 8px; font: inherit; }
+    textarea { min-height: 110px; resize: vertical; }
+    button { width: 100%; margin-top: 22px; padding: 13px; border: 0; border-radius: 8px; color: #fff; background: #2e7d46; font: inherit; font-weight: 700; cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .7; }
+    .status { min-height: 24px; margin-bottom: 0; color: #21663b; text-align: center; }
+    .status.error { color: #b3261e; }
+    .head { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+    .empty { padding: 24px; border: 1px dashed #cddbd0; border-radius: 12px; text-align: center; }
+    .list { display: grid; gap: 14px; margin-top: 16px; }
+    .item { min-width: 0; }
+    .item p { margin: 8px 0; overflow-wrap: anywhere; }
+    .item.is-completed { background: #e4e7e5; }
+    .item button { color: #286b3d; background: #fff; border: 1px solid #2e7d46; }
+    .item button:disabled { color: #62786a; background: #edf3ee; border-color: #d4dfd6; cursor: default; }
+    .photo { width: 100%; max-height: 260px; margin-top: 14px; border-radius: 9px; object-fit: cover; }
+    @media (max-width: 500px) { .page { padding: 20px 12px; } .box, .item { padding: 20px; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="box">
+      <span class="tag">시민 신고</span>
+      <h1>쓰레기 무단투기 신고</h1>
+      <p>발견한 장소와 사진을 남겨주시면 확인 후 처리하겠습니다.</p>
+      <form id="report-form">
+        <label for="photo">사진 첨부
+          <input id="photo" type="file" accept="image/*" required>
+        </label>
+        <label for="location">쓰레기 위치
+          <input id="location" type="text" placeholder="예: 해운대구 우동 123 앞" required>
+        </label>
+        <label for="description">상세 설명
+          <textarea id="description" placeholder="상세 내용을 적어주세요."></textarea>
+        </label>
+        <button id="submit-button" type="submit">신고하기</button>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section>
+      <div class="head">
+        <div><span class="tag">미화원 확인</span><h2>신고 접수 목록</h2></div>
+        <strong id="count">0건</strong>
+      </div>
+      <p id="empty" class="empty">접수된 신고가 없습니다.</p>
+      <div id="list" class="list" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCJmbsoC_Gh-6_wO1_L760Sk6BiIfpv8IA",
+      authDomain: "trash-app-4c13e.firebaseapp.com",
+      projectId: "trash-app-4c13e",
+      storageBucket: "trash-app-4c13e.firebasestorage.app",
+      messagingSenderId: "908284674035",
+      appId: "1:908284674035:web:03a89aec6024058dc99c86",
+      measurementId: "G-PQWCW0GRFG"
+    };
+
+    const form = document.querySelector("#report-form");
+    const photoInput = document.querySelector("#photo");
+    const locationInput = document.querySelector("#location");
+    const descriptionInput = document.querySelector("#description");
+    const submitButton = document.querySelector("#submit-button");
+    const statusElement = document.querySelector("#status");
+    const listElement = document.querySelector("#list");
+    const emptyElement = document.querySelector("#empty");
+    const countElement = document.querySelector("#count");
+
+    function showStatus(message, isError = false) {
+      statusElement.textContent = message;
+      statusElement.classList.toggle("error", isError);
+    }
+
+    function withTimeout(promise, milliseconds) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("요청 시간이 초과되었습니다.")), milliseconds)
+        )
+      ]);
+    }
+
+    function compressPhoto(file) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        const objectUrl = URL.createObjectURL(file);
+        image.onload = () => {
+          const maxSize = 800;
+          const ratio = Math.min(1, maxSize / Math.max(image.width, image.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(image.width * ratio);
+          canvas.height = Math.round(image.height * ratio);
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(objectUrl);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.65);
+          if (dataUrl.length > 850000) {
+            reject(new Error("사진 용량이 너무 큽니다. 더 작은 사진을 선택해 주세요."));
+            return;
+          }
+          resolve(dataUrl);
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error("사진을 읽을 수 없습니다."));
+        };
+        image.src = objectUrl;
+      });
+    }
+
+    function renderReports(documents) {
+      listElement.replaceChildren();
+      emptyElement.hidden = documents.length > 0;
+      countElement.textContent = `${documents.length}건`;
+
+      documents.forEach((documentSnapshot) => {
+        const report = documentSnapshot.data();
+        const card = document.createElement("article");
+        card.className = `item${report.is_completed ? " is-completed" : ""}`;
+        card.innerHTML = `
+          <strong>신고 #${documentSnapshot.id.slice(0, 6)}</strong>
+          <p><b>위치</b><br><span class="location"></span></p>
+          <p><b>설명</b><br><span class="description"></span></p>
+          ${report.photoUrl ? '<img class="photo" alt="신고 현장 사진">' : ""}
+          <button type="button" data-id="${documentSnapshot.id}" ${report.is_completed ? "disabled" : ""}>
+            ${report.is_completed ? "처리 완료됨" : "처리 완료"}
+          </button>`;
+        card.querySelector(".location").textContent = report.location || "";
+        card.querySelector(".description").textContent =
+          report.description || "작성된 상세 설명이 없습니다.";
+        const image = card.querySelector(".photo");
+        if (image) image.src = report.photoUrl;
+        listElement.append(card);
+      });
+    }
+
+    try {
+      firebase.initializeApp(firebaseConfig);
+      const reportsRef = firebase.firestore().collection("reports");
+
+      reportsRef.orderBy("createdAt", "desc").onSnapshot(
+        (snapshot) => renderReports(snapshot.docs),
+        (error) => {
+          console.error(error);
+          showStatus("목록을 불러오지 못했습니다. Firestore 규칙을 확인해 주세요.", true);
+        }
+      );
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!form.checkValidity()) return form.reportValidity();
+
+        submitButton.disabled = true;
+        submitButton.textContent = "사진 처리 중...";
+        showStatus("");
+
+        try {
+          const photoUrl = await compressPhoto(photoInput.files[0]);
+          submitButton.textContent = "저장 중...";
+          await withTimeout(
+            reportsRef.add({
+              photoUrl,
+              location: locationInput.value.trim(),
+              description: descriptionInput.value.trim(),
+              is_completed: false,
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            }),
+            15000
+          );
+          form.reset();
+          showStatus("신고가 정상적으로 저장되었습니다.");
+        } catch (error) {
+          console.error(error);
+          const message = error.code === "permission-denied"
+            ? "Firestore 쓰기 권한이 없습니다. Firebase 보안 규칙을 확인해 주세요."
+            : error.message || "저장에 실패했습니다.";
+          showStatus(message, true);
+        } finally {
+          submitButton.disabled = false;
+          submitButton.textContent = "신고하기";
+        }
+      });
+
+      listElement.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-id]");
+        if (!button) return;
+        button.disabled = true;
+        try {
+          await withTimeout(
+            reportsRef.doc(button.dataset.id).update({ is_completed: true }),
+            15000
+          );
+        } catch (error) {
+          console.error(error);
+          button.disabled = false;
+          showStatus("처리 상태 저장에 실패했습니다.", true);
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      showStatus("Firebase 연결에 실패했습니다. 인터넷 연결을 확인해 주세요.", true);
+      submitButton.disabled = true;
+    }
+  </script>
+</body>
+</html>
